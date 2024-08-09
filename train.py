@@ -10,13 +10,14 @@ import torch.nn.utils
 from torch.utils.data import DataLoader
 from einops import rearrange
 import wandb
+from tqdm import tqdm
 
 from model import BigramLanguageModel, MiniGPT
 from dataset import TinyStoriesDataset
 from config import BigramConfig, MiniGPTConfig
 
 
-MODEL = "bigram"  # bigram or minigpt
+MODEL = "minigpt"  # bigram or minigpt
 
 if MODEL == "bigram":
     config = BigramConfig
@@ -79,4 +80,60 @@ not a required part of the assignment.
 Feel free to experiment with the parameters and I would be happy to talk to you about them if interested :)
 """
 
-pass
+#========Set Loss Function and Optimizer========#
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay = 1e-4)
+#===============================================#
+
+#========Set Save Path========#
+best_model_params_path = "./models/" + MODEL + "/best_model_params.pt"
+torch.save(model.state_dict(), best_model_params_path)
+#=============================#
+
+#========Bookkeeping========#
+best_train_loss = 1000.0
+iteration = 0
+num_epochs = 1
+#===========================#
+
+#========Training Loop========#
+for epoch_idx in tqdm(range(num_epochs)):
+    for inputs, targets in train_dataloader:
+        if iteration==5000: #hard code to stop at 5000 iterations
+          break
+        model.train()
+        optimizer.zero_grad()
+        inputs = inputs.to(device)
+        targets = targets.to(device)
+        logits = model(inputs)
+        logits = logits.transpose(1,2)
+        loss = criterion(logits, targets)
+        loss.backward()
+        optimizer.step()
+        iteration += 1
+
+        if loss.item() < best_train_loss: #save model with best training loss
+            best_train_loss = loss.item()
+            torch.save(model.state_dict(), best_model_params_path)
+
+        if iteration%config.log_interval == 0: #record the loss in wandb and validate
+            wandb.log({"Training loss": loss.item()})
+            model.eval()
+            with torch.no_grad():
+                total_loss = 0.0
+                num_batches = 20
+                for i in range(num_batches): #validate on 20 batches from the eval dataset
+                    batch = next(iter(eval_dataloader))
+                    inputs, targets = batch
+                    inputs = inputs.to(device)
+                    targets = targets.to(device)
+                    logits = model(inputs)
+                    logits = logits.transpose(1,2)
+                    loss = criterion(logits, targets)
+                    total_loss += loss.item()
+                val_loss = total_loss/num_batches
+                wandb.log({"Validation loss": val_loss})
+
+    print(f'Epoch [{epoch_idx+1}/{num_epochs}], Loss: {loss.item():.4f}')
+wandb.finish()
+#=============================#

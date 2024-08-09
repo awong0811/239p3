@@ -27,9 +27,9 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         # ========= TODO : START ========= #
 
-        # self.embeddings = ...
-        # self.linear = ...
-        # self.dropout = ...
+        self.embeddings = nn.Embedding(config.vocab_size, config.embed_dim)
+        self.linear = nn.Linear(config.embed_dim, config.vocab_size, bias=True)
+        self.dropout = nn.Dropout(config.dropout)
 
         # ========= TODO : END ========= #
 
@@ -50,7 +50,13 @@ class BigramLanguageModel(nn.Module):
 
         # ========= TODO : START ========= #
 
-        raise NotImplementedError
+        # raise NotImplementedError
+        if x.dim()<2:
+            x = x.unsqueeze(0)
+        x = self.embeddings(x)
+        x = self.linear(x)
+        x = self.dropout(x)
+        return x
 
         # ========= TODO : END ========= #
 
@@ -87,9 +93,17 @@ class BigramLanguageModel(nn.Module):
         """
 
         ### ========= TODO : START ========= ###
-
-        raise NotImplementedError
-
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        input_stream = context.to(device)
+        for i in range(max_new_tokens):
+            context = input_stream[-1:].to(device)
+            output = self.forward(context)
+            prob = nn.functional.softmax(output, dim=-1)
+            last_token_prob = prob[:, -1, :]
+            pred = torch.multinomial(last_token_prob, num_samples=1)
+            pred = pred.view(-1)
+            input_stream = torch.cat((input_stream, pred), dim=-1).to(device)
+        return input_stream
         ### ========= TODO : END ========= ###
 
 
@@ -139,12 +153,12 @@ class SingleHeadAttention(nn.Module):
 
         # ========= TODO : START ========= #
 
-        # self.key = ...
-        # self.query = ...
-        # self.value = ...
-        # self.dropout = ...
+        self.key = nn.Linear(self.input_dim, self.output_key_query_dim, bias=False)
+        self.query = nn.Linear(self.input_dim, self.output_key_query_dim, bias=False)
+        self.value = nn.Linear(self.input_dim, self.output_value_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
 
-        # causal_mask = ...
+        causal_mask = torch.triu(torch.ones((max_len,max_len)),diagonal=1)
         # ========= TODO : END ========= #
 
         self.register_buffer(
@@ -166,7 +180,15 @@ class SingleHeadAttention(nn.Module):
 
         # ========= TODO : START ========= #
 
-        raise NotImplementedError
+        Q = self.query(x)
+        K = self.key(x)
+        V = self.value(x)
+
+        out = torch.matmul(Q, K.transpose(-2, -1))/math.sqrt(self.output_key_query_dim)
+        M = self.causal_mask[0:out.size(-2),0:out.size(-1)]
+        out.masked_fill_(M == 1, -1e10)
+        out = self.dropout(nn.functional.softmax(out,dim=-1))
+        return torch.matmul(out, V)
 
         # ========= TODO : END ========= #
 
@@ -196,9 +218,13 @@ class MultiHeadAttention(nn.Module):
 
         # ========= TODO : START ========= #
 
-        # self.head_{i} = ... # Use setattr to implement this dynamically, this is used as a placeholder
-        # self.out = ...
-        # self.dropout = ...
+        head_dim = int(self.input_dim/num_heads)
+        for i in range(self.num_heads):
+            setattr(self, f"head_{i}", SingleHeadAttention(input_dim=self.input_dim,
+                                                           output_key_query_dim=head_dim,
+                                                           output_value_dim=head_dim))
+        self.out = nn.Linear(self.input_dim,self.input_dim,bias=True)
+        self.dropout = nn.Dropout(dropout)
 
         # ========= TODO : END ========= #
 
@@ -217,7 +243,14 @@ class MultiHeadAttention(nn.Module):
 
         # ========= TODO : START ========= #
 
-        raise NotImplementedError
+        values = []
+        for i in range(self.num_heads):
+            head = getattr(self, f"head_{i}")
+            values.append(head(x))
+        out = torch.cat(values, dim=-1)
+        out = self.out(out)
+        out = self.dropout(out)
+        return out
 
         # ========= TODO : END ========= #
 
@@ -246,11 +279,10 @@ class FeedForwardLayer(nn.Module):
 
         # ========= TODO : START ========= #
 
-        # self.fc1 = ...
-        # self.activation = ...
-        # self.fc2 = ...
-        # self.fc2 = ...
-        # self.dropout = ...
+        self.fc1 = nn.Linear(input_dim,feedforward_dim,bias=True)
+        self.activation = nn.GELU()
+        self.fc2 = nn.Linear(feedforward_dim,input_dim,bias=True)
+        self.dropout = nn.Dropout(dropout)
 
         # ========= TODO : END ========= #
 
@@ -269,7 +301,11 @@ class FeedForwardLayer(nn.Module):
 
         ### ========= TODO : START ========= ###
 
-        raise NotImplementedError
+        out = self.fc1(x)
+        out = self.activation(out)
+        out = self.fc2(out)
+        out = self.dropout(out)
+        return out
 
         ### ========= TODO : END ========= ###
 
@@ -307,7 +343,13 @@ class LayerNorm(nn.Module):
 
         # ========= TODO : START ========= #
 
-        raise NotImplementedError
+        mean = torch.mean(input, dim=-1)
+        variance = torch.var(input, dim=-1, correction=0)
+        #.repeat(1,1,input.size(2))
+        mean = mean.unsqueeze(-1)
+        variance = variance.unsqueeze(-1)
+        out = (input-mean)/torch.sqrt(variance+self.eps)*self.gamma + self.beta
+        return out
 
         # ========= TODO : END ========= #
 
@@ -334,10 +376,10 @@ class TransformerLayer(nn.Module):
 
         # ========= TODO : START ========= #
 
-        # self.norm1 = ...
-        # self.attention = ...
-        # self.norm2 = ...
-        # self.feedforward = ...
+        self.norm1 = LayerNorm(input_dim)
+        self.attention = MultiHeadAttention(input_dim=input_dim, num_heads=num_heads)
+        self.norm2 = LayerNorm(input_dim)
+        self.feedforward = FeedForwardLayer(input_dim)
 
         # ========= TODO : END ========= #
 
@@ -356,7 +398,13 @@ class TransformerLayer(nn.Module):
 
         # ========= TODO : START ========= #
 
-        raise NotImplementedError
+        out = self.norm1(x)
+        out = self.attention(out)
+        cache = out + x
+        out = self.norm2(cache)
+        out = self.feedforward(out)
+        out = out + cache
+        return out
 
         # ========= TODO : END ========= #
 
@@ -432,7 +480,17 @@ class MiniGPT(nn.Module):
 
         ### ========= TODO : START ========= ###
 
-        raise NotImplementedError
+        if x.dim()<2: # means x.shape = seq_len, unsqueeze to make it 1xseq_len
+            x = x.unsqueeze(0)
+        out = self.vocab_embedding(x)
+        position = self.positional_embedding(self.pos)[:out.size(-2),:]
+        out = out + position
+        out = self.embed_dropout(out)
+        for transformer in self.transformer_layers:
+            out = transformer(out)
+        out = self.prehead_norm(out)
+        out = self.head(out)
+        return out
 
         ### ========= TODO : END ========= ###
 
@@ -465,6 +523,55 @@ class MiniGPT(nn.Module):
 
         ### ========= TODO : START ========= ###
 
-        raise NotImplementedError
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        input_stream = context.to(device)
+        for i in range(max_new_tokens):
+            context = input_stream[-10:].to(device)
+            output = self.forward(context)
+            prob = nn.functional.softmax(output, dim=-1)
+            last_token_prob = prob[:, -1, :]
+            pred = torch.multinomial(last_token_prob, num_samples=1).to(device)
+            pred = pred.view(-1)
+            input_stream = torch.cat((input_stream, pred), dim=-1).to(device)
+        return input_stream
 
         ### ========= TODO : END ========= ###
+
+
+class EncoderBlock(nn.Module):
+    def __init__(self, input_dim, num_heads, feedforward_dim=None):
+        super().__init__()
+        self.attention = MultiHeadAttention(input_dim=input_dim, num_heads=num_heads)
+        self.norm1 = LayerNorm(input_dim)
+        self.feedforward = FeedForwardLayer(input_dim)
+        self.norm2 = LayerNorm(input_dim)
+    def forward(self, x):
+        out = self.attention(x)
+        cache = self.norm1(out + x)
+        out = self.feedforward(cache)
+        out = self.norm2(out + cache)
+        return out
+class Encoder(nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.vocab_embedding = nn.Embedding(config.vocab_size, config.embed_dim)
+        self.positional_embedding = nn.Embedding(config.context_length, config.embed_dim)
+        self.embed_dropout = nn.Dropout(config.embed_dropout)
+        self.encoder_blocks = nn.ModuleList(
+            [
+                EncoderBlock(
+                    config.embed_dim, config.num_heads, config.feedforward_size
+                )
+                for _ in range(config.num_layers)
+            ]
+        )
+        pos = torch.arange(0, config.context_length, dtype=torch.long) #positional indices
+        self.register_buffer("pos", pos, persistent=False)
+    def forward(self, x):
+        out = self.vocab_embedding(x)
+        position = self.positional_embedding(self.pos)[:out.size(-2),:]
+        out = out + position
+        out = self.embed_dropout(out)
+        for encoder in self.encoder_blocks:
+            out = encoder(out)
+        return out
